@@ -1,1 +1,1 @@
-from .cnmc.cnmc import CNMc
+from .cnmc.cnmc import CNMc, ROMList

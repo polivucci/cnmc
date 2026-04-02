@@ -11,10 +11,12 @@ ax_dims = 0
 class ProcrustesEncoder(Encoder):
     '''Point cloud pt.Tensor shape (ndata, ndim)
     '''
-    def __init__(self, state=None, reference_state=None, reg=None):
+    def __init__(self, reference_state: pt.Tensor = None, reg=None):
         super().__init__()
         
         # reference point cloud 
+        # if reference_state is not None:
+        #     self.reference_state = reference_state
         self.vt_ref = None
         self._state_size = None
         
@@ -24,32 +26,27 @@ class ProcrustesEncoder(Encoder):
         self.rotation_ = None
         
         self.reg = reg        # SVD regularisation
-        self.is_ref_data = False
 
-        # train encoder:
-        if state is not None and reference_state is not None:
-            self.train(state=state, reference_state=reference_state)
+        if reference_state is not None:
+            reference_state = reference_state.detach()
+            self._state_size = reference_state.shape[ax_dims]
+            self.ref_shape = reference_state.shape
 
-    def train(self, state: pt.Tensor, reference_state: pt.Tensor):
+            # learn empirical frame of reference_state (centre -> scale -> principal components)
+            ref_scaled, _, _ = centre_and_standardize(reference_state)
+            self.ref_scaled = ref_scaled
+            u_ref, S_ref, _ = pt.linalg.svd(ref_scaled, full_matrices=False)
+            self.vt_ref = u_ref @ pt.diag(S_ref/S_ref[0])
+
+    def train(self, state: pt.Tensor):
         """
         Learns 
         1) the principal frame of 'reference_state' and 
         2) the affine transformation required to map 'state' to the principal frame
         If state is identical to reference_state, it just scales and centres.
         """
-        self._state_size = reference_state.shape[ax_dims]
 
-        reference_state = reference_state.detach()
         state = state.detach()
-
-        if state.shape==reference_state.shape:
-            if pt.all(state==reference_state): self.is_ref_data = True
-
-        # learn empirical frame of reference_state (centre -> scale -> principal components)
-        ref_scaled, _, _ = centre_and_standardize(reference_state)
-        self.ref_scaled = ref_scaled
-        u_ref, S_ref, _ = pt.linalg.svd(ref_scaled, full_matrices=False)
-        self.vt_ref = u_ref @ pt.diag(S_ref/S_ref[0])
 
         # learn empirical frame of target state (centre -> scale -> principal components)
         scaled, self.mean_, self.scale_ = centre_and_standardize(state)
@@ -57,15 +54,17 @@ class ProcrustesEncoder(Encoder):
         u_curr, S_curr, _ = pt.linalg.svd(scaled, full_matrices=False)
         self.vt_curr = u_curr @ pt.diag(S_curr/S_curr[0])
 
-        if self.is_ref_data:
-            self.rotation_ = pt.eye(self._state_size)
-            self.trained = True
-            return self
-
-        # learn frame alignment (Kabsch)
-        self.vt_curr = align_signs(self.vt_curr, self.vt_ref) # align signs of principal components
-        self.rotation_ = kabsch(self.vt_curr.T, self.vt_ref.T, reg=self.reg).T # transpositions as kabsch works on N,D tensors
-
+        # align signs of paired principal components
+        self.vt_curr = align_signs(self.vt_curr, self.vt_ref) 
+        # if reference data, leave as is
+        if state.shape==self.ref_shape:
+            if pt.all(self.vt_ref==self.vt_curr):
+                self.rotation_ = pt.eye(self._state_size)
+                self.trained = True
+                return self
+        
+        # else learn frame alignment (Kabsch)
+        self.rotation_ = kabsch(self.vt_curr.T, self.vt_ref.T, reg=self.reg).T # transpose as kabsch works on N,D tensors
         self.trained = True
         return self
 
@@ -81,13 +80,11 @@ class ProcrustesEncoder(Encoder):
 
         state = state.detach()
 
-        print('state', state.shape)
         # Apply transformation sequence
         centered = state - self.mean_
         scaled = centered / self.scale_
         aligned = pt.matmul(self.rotation_, scaled)
         
-        print('aligned', aligned.shape)
         return aligned
 
     def decode(self, reduced_state: pt.Tensor) -> pt.Tensor:
@@ -102,13 +99,11 @@ class ProcrustesEncoder(Encoder):
         reduced_state = reduced_state.detach()
 
         # Reverse Rotation (using transpose/inv)
-        print('reduced_state', reduced_state.shape)
         unrotated_np = pt.matmul(self.rotation_.T, reduced_state)
         
         # Reverse Scaling and Centering
         unscaled = (unrotated_np * self.scale_) + self.mean_
         
-        print('unscaled', unscaled.shape)
         return unscaled
 
     @property
@@ -129,7 +124,6 @@ class ProcrustesEncoder(Encoder):
         """
         return self._state_size
 
-
 def centre_and_standardize(state: pt.Tensor):
     mean = pt.mean(state, axis=ax_data, keepdims=True)
     centered = state - mean
@@ -137,20 +131,13 @@ def centre_and_standardize(state: pt.Tensor):
     scaled = centered / scale
     return scaled, mean, scale
 
-
 def kabsch(P: pt.Tensor, Q: pt.Tensor, reg=None) -> pt.Tensor:
     """
-    From: https://github.com/charnley/rmsd/blob/master/rmsd/calculate_rmsd.py
+    Ported from: https://github.com/charnley/rmsd/blob/master/rmsd/calculate_rmsd.py
 
     Using the Kabsch algorithm with two sets of paired point P and Q, centered
-    around the centroid. Each vector set is represented as an NxD
-    matrix, where D is the the dimension of the space.
-    The algorithm works in three steps:
-    - a centroid translation of P and Q (assumed done before this function
-      call)
-    - the computation of a covariance matrix C
-    - computation of the optimal rotation matrix R
-    For more info see http://en.wikipedia.org/wiki/Kabsch_algorithm
+    around the centroid. 
+
     Parameters
     ----------
     P : array
@@ -182,7 +169,6 @@ def kabsch(P: pt.Tensor, Q: pt.Tensor, reg=None) -> pt.Tensor:
 
     return R
 
-
 def align_signs(V1: pt.Tensor, V2: pt.Tensor) -> pt.Tensor:
     """
     For each column pair (v1, v2), flip the sign of v1 if it makes the sign of
@@ -203,7 +189,6 @@ def align_signs(V1: pt.Tensor, V2: pt.Tensor) -> pt.Tensor:
 
     # apply sign correction (broadcasting over rows)
     return V1 * signs.unsqueeze(0)
-
 
 def rmsd(P: pt.Tensor, Q: pt.Tensor) -> float:
     """

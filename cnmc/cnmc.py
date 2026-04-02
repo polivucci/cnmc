@@ -21,9 +21,7 @@ sys.path.append(PATH_FLOWTORCH)
 
 # standard library packages
 from abc import ABC #, abstractmethod, abstractproperty
-from typing import Dict, Tuple
-from collections import defaultdict, deque
-from itertools import groupby
+# from typing import Dict, Tuple
 
 # third party packages
 import numpy as np
@@ -34,11 +32,12 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
 from sklearn.pipeline import make_pipeline, Pipeline
 from sklearn.preprocessing import PolynomialFeatures, SplineTransformer, MinMaxScaler, minmax_scale
+from sklearn.cluster import KMeans
 
 from pysindy.pysindy import SINDy
 
 # Flowtorch packages
-from flowtorch.rom.base import ROM
+from flowtorch.rom.base import ROM, Encoder
 
 from .utils_cnmc import (get_CNM, 
                          sequential_rearrange_tensors, 
@@ -68,12 +67,16 @@ class ROMList(ABC):
         self.ocs = [rom["oc"] for rom in roms]
         self.roms = [rom["rom"] for rom in roms]
 
-
 class CNMc(ABC):
     """Control-oriented CNM as in manuscript.
     """
 
-    def __init__(self, roms: ROMList, **kwargs) -> None:
+    def __init__(self, 
+                 roms: ROMList, 
+                 encoders: list[Encoder], 
+                 encoder_model: None, 
+                 clustering, 
+                 **kwargs) -> None:
         """Inits and fits CNMc to the given observed OC values.
 
         Args:
@@ -83,9 +86,11 @@ class CNMc(ABC):
 
         self.roms = roms.roms
         self.ocs = roms.ocs
-        self.centroids = [pt.from_numpy(rom._cluster.cluster_centers_) for rom in self.roms]
-        self.mean_states = [rom.mean_state for rom in self.roms]
-        self.Ks = [centroids.shape[0] for centroids in self.centroids]
+        self.encoders = encoders
+        self.encoder_model = encoder_model
+        self.clustering = clustering
+
+        self.Ks = [rom.n_clusters for rom in self.roms]
         self.Ls = [rom.model_order for rom in self.roms]
         self.spline_order = self.roms[0].spline_order
         self.shapes = [(K,)*(L+1) for K,L in zip(self.Ks, self.Ls)]
@@ -104,24 +109,6 @@ class CNMc(ABC):
             self.alignment_algorithm = kwargs['alignment_algorithm']
         else:
             self.alignment_algorithm = trivial_assign
-
-        # Set centroid model:
-        self.centroid_model = spline_batch_interpolate
-        if 'centroid_model' in kwargs.keys(): 
-            if kwargs['centroid_model']=='PiecewiseLinear':
-                self.centroid_model = barycentric_batch_interpolate
-            elif kwargs['centroid_model']=='Spline':
-                self.centroid_model = spline_batch_interpolate
-            elif kwargs['centroid_model']=='SINDy':
-                self.centroid_model = sindy_batch_regression
-            else:
-                raise NotImplementedError("Must be one of: PiecewiseLinear, Spline, SINDy")
-        self.centroid_model_kwargs = {}
-        if 'centroid_model_options' in kwargs.keys(): 
-            self.centroid_model_kwargs = kwargs['centroid_model_options']
-
-        # Set transformation model:
-        # self.transformation_model = 
 
         # Set transition property model:
         self.transition_model = None
@@ -161,16 +148,33 @@ class CNMc(ABC):
             else:
                 raise NotImplementedError("Must be one of: Linear, RF, Polynomial")
 
-        # Fit model
-        self.train()
-
-    def train(self):
+    def train(self, data_train):
+        data_encoded = self._transform_data(data_train)
+        self._fit_clusters(data_encoded)
+        self._fit_croms(data_encoded)
         self._match_centroids()
-        # self._transform_data()
-        # self._fit_croms()
-        self._fit_model_centroids()
+        self._fit_model_encoder()
         self._fit_models_QT()
         return self
+
+    def _transform_data(self, data_train):
+        from .transformation_clustering import train_encoders
+        self.encoders = train_encoders(data_train, self.encoders)
+        return [encoder.encode(data) for data, encoder in zip(data_train, self.encoders)]
+
+    def _fit_clusters(self, data_train):
+        from .transformation_clustering import train_clusters
+        if 'cluster_centers_' in self.clustering['algorithm'].__dict__.keys():  # precomputed clustering
+            print('Using precomputed clusters')
+            return None
+        else: 
+            print('Computing clustering...')
+            return train_clusters(self.clustering, data_train, output_csv='clusters.csv')
+
+    def _fit_croms(self, data_train):
+        from .transformation_clustering import train_croms
+        train_croms(self.roms, data_train, self.encoders, self.clustering)
+        self.centroids = [pt.from_numpy(rom._cluster.cluster_centers_) for rom in self.roms]
 
     def _match_centroids(self) -> None:
         """Solve N_OC-1 linear assignement problems to match centroids across OCs.
@@ -191,28 +195,15 @@ class CNMc(ABC):
         self.matching = matching
         reordered_centroids, self.matched_indices = sequential_rearrange_tensors(self.centroids, 
                                                                                  self.matching)
-        self.matched_centroids = pt.transpose(pt.stack(reordered_centroids),0,1)
+        self.matched_centroids = pt.stack(reordered_centroids)
+        # self.matched_centroids = pt.transpose(pt.stack(reordered_centroids),0,1)
 
-    def _fit_model_centroids(self):
-        """Interpolate centroids in phase space.
+    def _fit_model_encoder(self):
+        """Train parametric encoder.
         """
         if len(self.ocs) < 2:
-            raise ValueError("At least two OCs must be available " +
-                            "to interpolate")
-        pass
-        # state_size = self.centroids[0].shape[-1]
-        # for centroids in self.matched_centroids:
-        #     for dim in range(state_size):
-        #         interpolator = InterpolatedUnivariateSpline(
-        #             self.ocs, 
-        #             centroids[:, dim],
-        #             k=1 #min(3, len(self.times)-1)
-        #         )
-        # self.centroid_interpolator = interpolator
-
-    def _fit_croms(self):
-
-        self.roms = ROMList([{"oc": oc, "rom": cnm} for oc, cnm in models_cnm_train.items()])
+            raise ValueError("At least two OCs must be available to interpolate")
+        self.encoder_model.train(self.encoders, self.ocs)
 
     def _fit_models_QT(self):
         """Gets and fits the transition property models. 
@@ -291,11 +282,11 @@ class CNMc(ABC):
         # apply constraints on stochastic matrix Q
         kill_lt0 = (Qs.values()<0.0)           # kill entries <0
         kill_gt1 = (Qs.values()>1.0)           # kill entries >1
-        kill_tiny = (Qs.values()<1e-4)         # kill transitions whose prob<.01%
+        # kill_tiny = (Qs.values()<1e-4)         # kill transitions whose prob<.01%
         kill_nonpositives = (Ts.values()<=0)   # kill entries w non positive holding time
         Qs.values()[kill_lt0] = 0.0
         Qs.values()[kill_gt1] = 1.0
-        Qs.values()[kill_tiny] = 0.0
+        # Qs.values()[kill_tiny] = 0.0
         Qs.values()[kill_nonpositives] = 0.0
 
         sparse_Qs=[]
@@ -324,7 +315,7 @@ class CNMc(ABC):
             Q, kill_zerosums = normalize_sparse_columns(Q)
             
             # build T 
-            kill_entries = kill_loners_naughts or kill_zerosums # drop if either loner or zerosum
+            kill_entries = pt.logical_or(kill_loners_naughts, kill_zerosums)  # drop if either loner or zerosum
             T = pt.sparse_coo_tensor(indices=T.indices()[:,~kill_entries], 
                         values=T.values()[~kill_entries], 
                         size=T.size()).coalesce()
@@ -355,18 +346,18 @@ class CNMc(ABC):
         
         # TODO: centralise ocs normalisation and unify methods
 
-        centroidss, self.centroid_interpolator = self.centroid_model(self.matched_centroids, 
-                                                                     self.ocs, 
-                                                                     oc, 
-                                                                     **self.centroid_model_kwargs)
+        # predict parametric transformation
+        pred_encoder = self.encoder_model.eval(oc)
 
         # predict Q, T
         Qs, Ts = self._predict_QT(oc)
-        
+
         # return list of CNM models 
-        return [get_CNM(centroidss[n].numpy(), Qs[n], Ts[n], 
+        return [get_CNM(self.matched_centroids[n].numpy(), 
+                        Qs[n], Ts[n], 
                         spline_order=self.spline_order, 
-                        dt=self.roms[0].dt) 
+                        dt=self.roms[0].dt,
+                        encoder=pred_encoder) 
                         for n in range(oc.shape[0])] 
 
     def predict(self, oc, initial_state: pt.Tensor,
