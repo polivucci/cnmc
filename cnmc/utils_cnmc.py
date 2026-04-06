@@ -341,12 +341,8 @@ def fit_model_P(Ps: list[pt.Tensor], ocs: list, base_model=None, base_model_opti
 
     V_regressor = []
     for batch in range(Ps_nnz_dense.shape[-1]):
-        if base_model==make_pipeline:
-            models_i = [deepcopy(mod) for mod in base_model_options]
-            model_i = make_pipeline(*models_i)
-            model_i.fit(X = np.array(nocs), y = Ps_nnz_dense[:, batch])
-        else:
-            model_i = base_model(**base_model_options).fit(np.array(nocs), Ps_nnz_dense[:, batch])
+        model_i = deepcopy(base_model)
+        model_i.fit(np.array(nocs), Ps_nnz_dense[:, batch])
         V_regressor.append([model_i])
     
     return V_regressor, Ps_nnz[0].indices(), Ps_nnz[0].size()

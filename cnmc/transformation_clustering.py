@@ -4,26 +4,26 @@ from pandas import read_csv, DataFrame
 from copy import deepcopy
 
 def train_encoders(data_train, encoders):
-    encoders_train = []
-    for data, encoder in zip(data_train, encoders):
+    encoders_train = {}
+    for (oc, data), encoder in zip(data_train.items(), encoders):
         encoder.train(data)
-        encoders_train.append(encoder)
+        encoders_train[oc] = encoder
     return encoders_train
 
 def collect_parameters(encoders):
-    stds_train = []
-    means_train = []
-    rotations_train = []
-    for encoder in encoders:
-        stds_train.append(encoder.scale_)
-        means_train.append(encoder.mean_)
-        rotations_train.append(encoder.rotation_.flatten())
+    stds_train = {}
+    means_train = {}
+    rotations_train = {}
+    for oc, encoder in encoders.items():
+        stds_train[oc] = encoder.scale_
+        means_train[oc] = encoder.mean_
+        rotations_train[oc] = encoder.rotation_.flatten()
     return stds_train, means_train, rotations_train
 
 def train_clusters(clustering, data_train, output_csv='clusters.csv'):
 
     # cluster all data:
-    all_data = cat(data_train, dim=1)
+    all_data = cat(tuple(data_train.values()), dim=1)
     
     # compute clusters:
     clustering_all = clustering['algorithm'].fit(all_data.T.numpy()) # batch dimension comes first in Scikit-Learn
@@ -43,11 +43,12 @@ def read_clusters_from_file(cluster_csv, **kwargs_kmeans):
 
 def train_croms(roms, data_train, encoders, clustering_all, encode=False):
     # Setup and fit n CNMs with pre-computed cluster centres and encoding.
-    
-    for rom, data, encoder in zip(roms, data_train, encoders):
+
+    for rom, oc in zip(roms, data_train.keys()):
         # print('Fitting CNM on training parameter '+str(PARAMETERS[m]))
-        if encode: data = encoder.encode(data)
-        rom.encoder = encoder
+        data = data_train[oc]
+        if encode: data = encoders[oc].encode(data_train[oc])
+        rom.encoder = encoders[oc]
         rom.cluster_config = deepcopy(clustering_all)
         rom.train(reduced_state=data)
 

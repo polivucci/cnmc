@@ -18,9 +18,9 @@ class procrustes_model(object):
         # nocs = (nocs - ocsmin) / (ocsmax-ocsmin)
         # print('nocs', nocs)
 
-        means_train = [encoder.mean_ for encoder in encoders]
-        stds_train = [encoder.scale_ for encoder in encoders]
-        rotations_train = [encoder.rotation_.flatten() for encoder in encoders]
+        means_train = [encoder.mean_ for encoder in encoders.values()]
+        stds_train = [encoder.scale_ for encoder in encoders.values()]
+        rotations_train = [encoder.rotation_.flatten() for encoder in encoders.values()]
         
         means_trains = pt.concat(means_train, dim=-1).T.unsqueeze(0)
         stds_trains = pt.Tensor(stds_train).unsqueeze(0).unsqueeze(-1)

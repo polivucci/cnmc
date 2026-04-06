@@ -76,12 +76,21 @@ class CNMc(ABC):
                  encoders: list[Encoder], 
                  encoder_model: None, 
                  clustering, 
+                 transition_model: None,
                  **kwargs) -> None:
-        """Inits and fits CNMc to the given observed OC values.
+        """
 
         Args:
-            roms (ROMList): contains pre-fitted ROMs at corresponding observed parameters.
+            roms (ROMList): M instances of a CROM model, one for each operating condition (OC) in the data.
+            encoders (list[Encoder]): M instances of encoder.
+            encoder_model (None): supervised model for the parametric transformation.
+            clustering (_type_): instance of a sklearn-style clustering algorithm.
+            transition_model (None): instance of a sklearn-style supervised model for a single transition property.
+
+        Methods:
+            train: list of tensors and train the CNMc model.
         """
+
         super().__init__()
 
         self.roms = roms.roms
@@ -111,42 +120,9 @@ class CNMc(ABC):
             self.alignment_algorithm = trivial_assign
 
         # Set transition property model:
-        self.transition_model = None
+        self.transition_model = transition_model
         self.transition_model_options = {}
-        if 'transition_model' in kwargs.keys(): 
-            if kwargs['transition_model']=='Linear':
-                self.transition_model = LinearRegression
-                self.transition_model_options = {}
-                self.transition_model_options_t = {}
-            elif kwargs['transition_model']=='RF':
-                self.transition_model = RandomForestRegressor
-                self.transition_model_options = {"n_estimators" : int(1e+2),
-                                                 "criterion" : "absolute_error",
-                                                 "max_features" : "log2",
-                                                 "bootstrap" : True,
-                                                 "oob_score" : False,
-                                                 "n_jobs" : -1,
-                                                 "random_state":0,
-                                                 "warm_start" : True,}
-            elif kwargs['transition_model']=='Polynomial':
-                ############################ 
-                ### working settings as in manuscript, 
-                ### with centroid_model='PiecewiseLinear' and linear trajectory interpolation in CNM 
-                knots = minmax_scale(np.array(self.ocs))
-                self.transition_model_options = [MinMaxScaler(), PolynomialFeatures(degree=3), Lasso(1e-2)]  
-                # self.transition_model_options = [MinMaxScaler(), SplineTransformer(knots=knots, degree=1), Ridge(1e-5)]
-                # self.transition_model_options = [MinMaxScaler(), PolynomialFeatures(degree=3), Ridge(1e-2)]     
-                ############################
-                #### other experiments:
-                # self.transition_model_options = [PolynomialFeatures(degree=5), Lasso(1e-1)]
-                # self.transition_model_options = [PolynomialFeatures(degree=len(self.ocs)-1), LinearRegression()]
-                # self.transition_model_options = [MinMaxScaler(), SplineTransformer(n_knots=len(self.ocs), degree=3), Ridge(1e-3)]
-                self.transition_model_options_t = [MinMaxScaler(), PolynomialFeatures(degree=3), Lasso(1e-2)]  
-                # self.transition_model_options_t = [MinMaxScaler(), SplineTransformer(knots=knots, degree=1), Ridge(1e-3)]
-                # self.transition_model_options = [SplineTransformer(knots=knots, degree=1), LinearRegression()]
-                self.transition_model = make_pipeline
-            else:
-                raise NotImplementedError("Must be one of: Linear, RF, Polynomial")
+        self.transition_model_options_t = {}
 
     def train(self, data_train):
         data_encoded = self._transform_data(data_train)
@@ -160,7 +136,7 @@ class CNMc(ABC):
     def _transform_data(self, data_train):
         from .transformation_clustering import train_encoders
         self.encoders = train_encoders(data_train, self.encoders)
-        return [encoder.encode(data) for data, encoder in zip(data_train, self.encoders)]
+        return {oc: self.encoders[oc].encode(data_train[oc]) for oc in data_train.keys()}
 
     def _fit_clusters(self, data_train):
         from .transformation_clustering import train_clusters
@@ -344,8 +320,6 @@ class CNMc(ABC):
             ROM: _description_
         """
         
-        # TODO: centralise ocs normalisation and unify methods
-
         # predict parametric transformation
         pred_encoder = self.encoder_model.eval(oc)
 
@@ -366,11 +340,3 @@ class CNMc(ABC):
         """
         cnm = self.predict_model(oc)
         return cnm.predict(initial_state, end_time, step_size)
-
-    # @property
-    # def ocs(self):
-    #     return self.ocs
-
-    # @property
-    # def cluster_centers(self):
-    #     return self.centroids
