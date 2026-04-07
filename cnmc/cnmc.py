@@ -1,40 +1,13 @@
 """Implementation of control-oriented cluster-based network modeling (CNMc).
-
-0: Pick K
-1: Fit CNM_OCi (K, L) models for each OCi
-
-Centroid tracking
-3: Solve N_OC-1 Procrustes problems to determine centroid labels
-4: Interpolate in space using SINDy
-Transition modelling
-5: Apply scaling to Q, T
-6: Train a RF model on Q, T
-
-Prediction at OC'
-7: Get centroids from SINDy(OC')
-8: Get Q, T from RF(OC')
-9: Query CNM_OC with an initial condition
 """
-import sys
-PATH_FLOWTORCH = '/home/paolo/Desktop/semaan/semaan-project/cnm/hands-on/flowtorch/lorenz/'
-sys.path.append(PATH_FLOWTORCH)
 
 # standard library packages
-from abc import ABC #, abstractmethod, abstractproperty
-# from typing import Dict, Tuple
+from abc import ABC 
 
 # third party packages
 import numpy as np
 import torch as pt
 pt.set_default_dtype(pt.float64)
-
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.linear_model import LinearRegression, Ridge, Lasso
-from sklearn.pipeline import make_pipeline, Pipeline
-from sklearn.preprocessing import PolynomialFeatures, SplineTransformer, MinMaxScaler, minmax_scale
-from sklearn.cluster import KMeans
-
-from pysindy.pysindy import SINDy
 
 # Flowtorch packages
 from flowtorch.rom.base import ROM, Encoder
@@ -43,18 +16,12 @@ from .utils_cnmc import (get_CNM,
                          sequential_rearrange_tensors, 
                          custom_dict_to_sparse_coo, 
                          dict_to_sparse_coo, 
-                         barycentric_batch_interpolate, 
-                         spline_batch_interpolate,
                          fit_model_P,
-                         sindy_batch_regression,
-                         spline_batch_predict,
                          model_batch_predict,
                          zero_adjacent_equal_indices_sparse,
                          normalize_sparse_columns,
                          stack_sparse_tensors_to_hybrid,
                          rearrange_tensor_sparse,
-                         unify_sparse_tensors,
-                         unified_sparse_to_dense_flat
                          ) 
 
 from .utils_cnmc_matching import trivial_assign
@@ -84,11 +51,11 @@ class CNMc(ABC):
             roms (ROMList): M instances of a CROM model, one for each operating condition (OC) in the data.
             encoders (list[Encoder]): M instances of encoder.
             encoder_model (None): supervised model for the parametric transformation.
-            clustering (_type_): instance of a sklearn-style clustering algorithm.
+            clustering : instance of a sklearn-style clustering algorithm.
             transition_model (None): instance of a sklearn-style supervised model for a single transition property.
 
         Methods:
-            train: list of tensors and train the CNMc model.
+            train: takes in a dict of tensors and trains the CNMc model.
         """
 
         super().__init__()
@@ -124,7 +91,7 @@ class CNMc(ABC):
         self.transition_model_options = {}
         self.transition_model_options_t = {}
 
-    def train(self, data_train):
+    def train(self, data_train: dict):
         data_encoded = self._transform_data(data_train)
         self._fit_clusters(data_encoded)
         self._fit_croms(data_encoded)
@@ -134,12 +101,12 @@ class CNMc(ABC):
         return self
 
     def _transform_data(self, data_train):
-        from .transformation_clustering import train_encoders
+        from .utils_train import train_encoders
         self.encoders = train_encoders(data_train, self.encoders)
         return {oc: self.encoders[oc].encode(data_train[oc]) for oc in data_train.keys()}
 
     def _fit_clusters(self, data_train):
-        from .transformation_clustering import train_clusters
+        from .utils_train import train_clusters
         if 'cluster_centers_' in self.clustering['algorithm'].__dict__.keys():  # precomputed clustering
             print('Using precomputed clusters')
             return None
@@ -148,7 +115,7 @@ class CNMc(ABC):
             return train_clusters(self.clustering, data_train, output_csv='clusters.csv')
 
     def _fit_croms(self, data_train):
-        from .transformation_clustering import train_croms
+        from .utils_train import train_croms
         train_croms(self.roms, data_train, self.encoders, self.clustering)
         self.centroids = [pt.from_numpy(rom._cluster.cluster_centers_) for rom in self.roms]
 
@@ -219,11 +186,7 @@ class CNMc(ABC):
         values = model_batch_predict(V_regressor, 
                                      np.atleast_2d(np.array(self.ocs)),  
                                      oc.numpy()
-                                     )[:,:,0].T # for use with linear and 
-        # values = spline_batch_predict(V_regressor, 
-        #                               np.array(self.ocs)[:,None], 
-        #                               oc.numpy()
-        #                               )[:,:,0] # for use with spline and sindy
+                                     )[:,:,0].T 
 
         # This is an hybrid tensor where last dimension is dense and equal to number of predicted OCs
         Q = pt.sparse_coo_tensor(indices=nnz_indices, values=values, size=size+(values.shape[1],))
@@ -310,33 +273,33 @@ class CNMc(ABC):
         Qs, Ts = self._predict_Q(oc, Ts)
         return Qs, Ts
 
-    def predict_model(self, oc) -> ROM:
+    def predict_model(self, ocs) -> dict[ROM]:
         """Main predictive method that returns CNM model at the queried OCs.
 
         Args:
-            oc (_type_): batch of Operating Conditions.
+            ocs (pt.Tensor): batch of Operating Conditions.
 
         Returns:
-            ROM: _description_
+            (dict[ROM]): CROMs at unseen OCs
         """
         
-        # predict parametric transformation
-        pred_encoder = self.encoder_model.eval(oc)
+        # predict parametric transformation for test OC
+        pred_encoder = self.encoder_model.eval(ocs)
 
         # predict Q, T
-        Qs, Ts = self._predict_QT(oc)
+        Qs, Ts = self._predict_QT(ocs)
 
-        # return list of CNM models 
-        return [get_CNM(self.matched_centroids[n].numpy(), 
+        # return list of CROM models 
+        return {tuple(oc.tolist()): get_CNM(self.matched_centroids[n].numpy(), 
                         Qs[n], Ts[n], 
                         spline_order=self.spline_order, 
                         dt=self.roms[0].dt,
                         encoder=pred_encoder) 
-                        for n in range(oc.shape[0])] 
+                        for n, oc in enumerate(ocs)}
 
-    def predict(self, oc, initial_state: pt.Tensor,
+    def predict(self, ocs: pt.Tensor, initial_state: pt.Tensor,
                 end_time: float, step_size: float) -> pt.Tensor:
         """Advance initial_state in time at the queried OC.
         """
-        cnm = self.predict_model(oc)
-        return cnm.predict(initial_state, end_time, step_size)
+        pred_croms = self.predict_model(ocs)
+        return {oc: pred_croms[oc].predict(initial_state, end_time, step_size) for oc in pred_croms.keys()}

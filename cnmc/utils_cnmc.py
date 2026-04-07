@@ -1,19 +1,17 @@
 from typing import Dict, Tuple
 from collections import defaultdict
 from copy import deepcopy
-from math import comb
 
 # third party packages
 import numpy as np
 import torch as pt
-from scipy.interpolate import InterpolatedUnivariateSpline
-from pysindy.pysindy import SINDy
-from pysindy import PolynomialLibrary, GeneralizedLibrary, STLSQ
+pt.set_default_dtype(pt.float64)
+
+from sklearn.utils._openmp_helpers import _openmp_effective_n_threads
 
 # flowtorch packages
-from flowtorch.rom import CNM
+from ..crom import CNM
 
-pt.set_default_dtype(pt.float64)
 
 def reshape_columns(tensor: pt.Tensor, shape: Tuple[int, ...]) -> list[pt.Tensor]:
     """Reshapes columns of a 2D tensor and stores them in a list.
@@ -138,22 +136,23 @@ def get_CNM(centroids, Q, T, dt, spline_order=3, encoder=None) -> CNM:
     # Extract cluster number and model order from transition matrix
     n_clusters = Q.shape[0];
     model_order=len(Q.shape)-1
-    X = None
-    # if encoder is not None: X = pt.zeros((encoder.reduced_state_size, n_clusters*3)) # placeholder
+
     # Initialise CNM instance without data
-    cnm = CNM(X, 
-              encoder=encoder, 
+    cnm = CNM(encoder=encoder, 
               dt=dt, 
               n_clusters=n_clusters, 
               model_order=model_order,
               spline_order = spline_order,
               )
+    
     # Convert Q and T to the dictionary format used by CNM
     Q = sparse_coo_to_custom_dict(Q)
     T = sparse_coo_to_dict(T)
     cnm._transition_prob = Q
     cnm._transition_time = T
     cnm.cluster_centers = centroids
+    cnm._cluster._n_threads = _openmp_effective_n_threads()
+
     return cnm
 
 def sequential_rearrange_tensors(tensor_list, matching_pairs):
@@ -168,97 +167,6 @@ def sequential_rearrange_tensors(tensor_list, matching_pairs):
         j2_prev = j2[j2_prev]
     
     return result, matched_indices
-
-def barycentric_batch_interpolate(data, parameters, interpolation_parameters, **kwargs):
-    """
-    Perform multi-dimensional barycentric interpolation on batches of points.
-
-    Args:
-        data (torch.Tensor): Shape (num_batches, num_points, num_coords). Data points.
-        parameters (torch.Tensor): Shape (num_points, d). Values of the parameters associated to each data point.
-        interpolation_parameters (torch.Tensor): Shape (num_t, d). Values of the parameters to interpolate at.
-
-    Returns:
-        torch.Tensor: Interpolated points, shape (num_batches, num_t, num_coords).
-    """
-    p = 1 # linear interpolation
-
-    num_batches, num_points, num_coords = data.shape
-    num_t, d = interpolation_parameters.shape
-    if not isinstance(parameters, pt.Tensor): parameters = pt.atleast_2d(pt.Tensor(parameters))
-
-    # Result tensor for the interpolated points
-    interpolated_points = pt.zeros((num_t, num_batches, num_coords), device=data.device, dtype=data.dtype)
-
-    for t_idx in range(num_t):
-        target_param = interpolation_parameters[t_idx]  # (d,)
-
-        # Compute distances in parameter space
-        distances = pt.cdist(target_param.unsqueeze(0), parameters)  # Shape: (num_points,)
-        distances = distances.squeeze(0)  # Shape: (num_points,)
-
-        # Find the indices of the closest d+p points
-        nearest_indices = pt.topk(distances, k=d+p, largest=False).indices  # (d+p,)
-
-        # Extract the nearest points and their parameters
-        nearest_params = parameters[nearest_indices, :]  # Shape: (d+p, d)
-        A = pt.cat([nearest_params.T, pt.ones(1, d+p, device=data.device)], dim=0)  # Shape: (d+p, d+p)
-
-        # Solve for barycentric weights
-        b = pt.cat([target_param, pt.ones(1, device=data.device)])  # Shape: (d+p,)
-        weights = pt.linalg.solve(A, b)  # Shape: (d+p,)
-
-        # Interpolate points for each batch
-        nearest_points = data[:, nearest_indices, :]  # Shape: (num_batches, d+p, num_coords)
-        interpolated_points[t_idx, :, :] = pt.einsum('i,bic->bc', weights, nearest_points)
-
-    return interpolated_points, None
-
-
-def spline_batch_interpolate(points: pt.Tensor, ocs, t: pt.Tensor, **kwargs_spline) -> pt.Tensor:
-    """
-    Performs cubic spline interpolation between batches of points for multiple ordered t values.
-    Uses scipy.interpolate.InterpolatedUnivariateSpline.
-    
-    Args:
-    points (pt.Tensor): Tensor of shape (num_batches, num_points, num_coords) containing point coordinates.
-    t (pt.Tensor): 1D tensor of interpolation parameters, each between 0 and 1.
-    
-    Returns:
-    pt.Tensor: Interpolated points of shape (num_t, num_batches, num_coords).
-    """
-    num_batches, num_points, num_coords = points.shape
-
-    # Create a uniform [0,1] parameterization for the input points
-    if not isinstance(ocs, pt.Tensor): ocs = pt.Tensor(ocs)
-    u = (ocs-ocs[0]) / (ocs[-1]-ocs[0])
-
-    # Set max spline order to 3
-    # k=3
-    if 'k' not in kwargs_spline.keys(): 
-        kwargs_spline['k'] = min(3, num_points-1)
-
-    splines = []
-    # Perform spline interpolation for each batch and coordinate
-    for batch in range(num_batches):
-        spline = []
-        for coord in range(num_coords):
-            spline_i = InterpolatedUnivariateSpline(u, points[batch, :, coord], **kwargs_spline)
-            spline.append(spline_i)
-        splines.append(spline)
-
-    # Predict
-    interpolated = None
-    if t is not None:
-        # Initialize the output tensor
-        num_t = len(t)
-        t = pt.Tensor((t-ocs[0]) / (ocs[-1]-ocs[0]))
-        interpolated = pt.zeros((num_t, num_batches, num_coords))
-        for batch, spline in enumerate(splines):
-            for coord, spline_i in enumerate(spline):
-                interpolated[:, batch, coord] = pt.Tensor(spline_i(t[:,0].numpy()))
-
-    return interpolated, splines
 
 def model_batch_predict(models, ocs, t):
     """Temporary interface to make predictions across multiple OCs.
@@ -287,28 +195,7 @@ def model_batch_predict(models, ocs, t):
 
     return interpolated
 
-def spline_batch_predict(splines, ocs, t):
-    """Temporary interface to make spline predictions across multiple OCs.
-    """
-
-    num_batches, num_coords = len(splines), 1
-    nocs = pt.atleast_2d(pt.Tensor(ocs))
-    ocsmin = pt.min(nocs, dim=0, keepdim=True).values
-    ocsmax = pt.max(nocs, dim=0, keepdim=True).values
-    t = pt.atleast_2d(pt.Tensor(t))
-    t = (t - ocsmin) / (ocsmax-ocsmin)
-    num_t = t.shape[0]
-
-    # Initialize the output tensor
-    interpolated = pt.zeros((num_t, num_batches, num_coords))
-    for batch, spline in enumerate(splines):
-        for coord, spline_i in enumerate(spline):
-            interpolated[:, batch, coord] = pt.Tensor(spline_i(t[:,0].numpy()))
-
-    return interpolated
-
 from sklearn.linear_model import LinearRegression
-from sklearn.pipeline import make_pipeline
 
 def fit_model_P(Ps: list[pt.Tensor], ocs: list, base_model=None, base_model_options={}): 
     """Fits regression model of a transition matrix's nonzero elements (Q or T).
@@ -347,67 +234,6 @@ def fit_model_P(Ps: list[pt.Tensor], ocs: list, base_model=None, base_model_opti
     
     return V_regressor, Ps_nnz[0].indices(), Ps_nnz[0].size()
 
-def sindy_batch_regression(points: pt.Tensor, ocs, t: pt.Tensor, sindy_model=None, **kwargs) -> pt.Tensor:
-    """
-    Performs SINDy regression between batches of points for multiple t values.
-    Uses scipy.interpolate.InterpolatedUnivariateSpline.
-    
-    Args:
-    points (pt.Tensor): Tensor of shape (num_batches, num_points, num_coords) containing data point coordinates.
-    ocs (pt.Tensor): Tensor of shape (num_points, num_oc_dims) containing data OCs.
-    t (pt.Tensor): 1D tensor of interpolation parameters, each between 0 and 1.
-    
-    Returns:
-    pt.Tensor: Interpolated points of shape (num_t, num_points, num_coords).
-    """
-    num_batches, num_points, num_coords = points.shape
-
-    # Create a uniform [0,1] parameterization for the input points
-    if not isinstance(ocs, pt.Tensor): ocs = pt.Tensor(ocs)
-    u = (ocs-ocs[0]) / (ocs[-1]-ocs[0])
-    # and the test points:
-    
-    # Set up SINDy 
-    if sindy_model is None:
-        library = GeneralizedLibrary((
-                            PolynomialLibrary(degree=3, include_interaction=True, include_bias=True), 
-                            # CustomLibrary([
-                            #             lambda x: 1.0,
-                            #             lambda x: np.exp(-x),
-                            #             lambda x: np.exp(-x*x),
-                            #             ],),
-                            ),
-                            )
-        sparse_optimizer = STLSQ(threshold=0.1, 
-                                alpha=1e-3,
-                                normalize_columns=True, 
-                                max_iter=1000)
-        sindy_model = SINDy(feature_library=library, 
-                            optimizer=sparse_optimizer)
-    
-    models = []
-    
-    # Fit SINDy on each batch and regress
-    for batch in range(num_batches):
-        sindy_model_fitted = deepcopy(sindy_model)
-        sindy_model_fitted.fit(x=u.numpy(), 
-                               x_dot=points[batch, :, :].numpy(),
-                               )
-        models.append(sindy_model_fitted)
-
-    # Predict
-    interpolated = None
-    if t is not None:
-        # Initialize the output tensor
-        num_t = len(t)
-        interpolated = pt.zeros((num_t, num_batches, num_coords))
-        t = pt.Tensor((t-ocs[0]) / (ocs[-1]-ocs[0]))
-        for batch in range(num_batches):
-            interpolated[:, batch, :] = pt.Tensor(models[batch].predict(t.numpy()))
-    
-    # Return preds and models
-    return interpolated, models
-
 def zero_adjacent_equal_indices_dense(tensor):
     """Sets to zero the elements of the transition tensor which have an equal pair of adjacent
     indices. This excludes self transitions.
@@ -443,49 +269,6 @@ def zero_adjacent_equal_indices_sparse(sparse_tensor):
     
     # Create a new sparse tensor with the updated values and indices
     return pt.sparse_coo_tensor(new_indices, new_values, sparse_tensor.size())
-
-def rearrange_tensor_first2dims(Q, idx):
-    """Rearranges the first 2 dimensions of a dense tensor according to index idx.
-    """
-    if Q.is_sparse: Q=Q.to_dense()
-    Q = Q[idx, ...]
-    Q = Q[:,idx, ...]
-    return Q
-
-def rearrange_tensor_sparse_first2dims(Q, idx):
-    """Sparse version of `rearrange_tensor` written by Claude
-    """
-
-    # Ensure Q is in COO format
-    Q = Q.coalesce()
-
-    # Get the indices and values of the sparse tensor
-    indices = Q.indices()
-    values = Q.values()
-    
-    # Rearrange the first dimension
-    mask = pt.isin(indices[0], idx)
-    new_indices = indices[:, mask]
-    new_values = values[mask]
-
-    # Map old indices to new positions
-    index_map = {old: new for new, old in enumerate(idx.tolist())}
-    new_indices[0] = pt.tensor([index_map[i.item()] for i in new_indices[0]])
-    
-    # Rearrange the second dimension
-    mask = pt.isin(new_indices[1], idx)
-    new_indices = new_indices[:, mask]
-    new_values = new_values[mask]
-    
-    # Map old indices to new positions for the second dimension
-    new_indices[1] = pt.tensor([index_map[i.item()] for i in new_indices[1]])
-    
-    # Create the new sparse tensor
-    size = list(Q.size())
-    size[0] = len(idx)
-    size[1] = len(idx)
-    
-    return pt.sparse_coo_tensor(new_indices, new_values, size=size)
 
 def rearrange_tensor_sparse(Q, idx):
     """Sparse version of `rearrange_tensor` written by Claude
@@ -620,7 +403,6 @@ def normalize_sparse_columns(sparse_tensor):
     sums_indices = column_sums._indices()
     sums_values = column_sums._values()
 
-
     # Prepare indices for the remaining dimensions
     remaining_indices = indices[1:]
     
@@ -651,12 +433,6 @@ def normalize_sparse_columns(sparse_tensor):
         normalized_values[~kill_zerosums], 
         size=sparse_tensor.size()
     )
-
-    # column_sums = pt.sparse.sum(normalized_tensor, dim=0)
-    # column_sums_iszero = (column_sums._values()==0.0)
-    # column_sums = column_sums.coalesce()
-    # sums_values = column_sums._values()
-    # sums_indices = column_sums._indices()
 
     # Create and return the normalized sparse tensor
     return normalized_tensor, kill_zerosums

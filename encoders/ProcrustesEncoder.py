@@ -9,10 +9,10 @@ ax_dims = 0
 
 
 class ProcrustesEncoder(Encoder):
-    '''Point cloud pt.Tensor shape (ndata, ndim)
-    '''
     def __init__(self, reference_state: pt.Tensor = None, reg=None):
         super().__init__()
+        '''Inputs are pt.Tensor of shape (ndata, ndim)
+        '''
         
         # reference point cloud 
         # if reference_state is not None:
@@ -133,10 +133,9 @@ def centre_and_standardize(state: pt.Tensor):
 
 def kabsch(P: pt.Tensor, Q: pt.Tensor, reg=None) -> pt.Tensor:
     """
-    Ported from: https://github.com/charnley/rmsd/blob/master/rmsd/calculate_rmsd.py
 
-    Using the Kabsch algorithm with two sets of paired point P and Q, centered
-    around the centroid. 
+    Kabsch algorithm on two sets of paired points P and Q, centered around the centroid. 
+    Adapted from: https://github.com/charnley/rmsd/blob/master/rmsd/calculate_rmsd.py
 
     Parameters
     ----------
