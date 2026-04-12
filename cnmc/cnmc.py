@@ -248,15 +248,18 @@ class CNMc(ABC):
             Q = pt.sparse_coo_tensor(indices=Q_indices[:,~kill_loners_naughts], 
                                     values=Q_values[~kill_loners_naughts], 
                                     size=Q.size()).coalesce()
+            # build T 
+            T = pt.sparse_coo_tensor(indices=T.indices()[:,~kill_loners_naughts], 
+                        values=T.values()[~kill_loners_naughts], 
+                        size=T.size()).coalesce()
+
             # set self transitions (diagonal) to zero; may or may not be redundant:
             Q = zero_adjacent_equal_indices_sparse(Q.coalesce()) 
             # normalise Q column sum to 1
             Q, kill_zerosums = normalize_sparse_columns(Q)
             
-            # build T 
-            kill_entries = pt.logical_or(kill_loners_naughts, kill_zerosums)  # drop if either loner or zerosum
-            T = pt.sparse_coo_tensor(indices=T.indices()[:,~kill_entries], 
-                        values=T.values()[~kill_entries], 
+            T = pt.sparse_coo_tensor(indices=T.indices()[:,~kill_zerosums], 
+                        values=T.values()[~kill_zerosums], 
                         size=T.size()).coalesce()
 
             sparse_Qs.append(Q.coalesce())

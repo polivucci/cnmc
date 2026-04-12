@@ -5,6 +5,7 @@ Refer to the accompanying paper for the algorithm description:
 
 Lorenz data for use in `experiments/lorenz63` can be downloaded from https://doi.org/10.5281/zenodo.19450335
 
+![](cnmc.jpg)
 
 #### Installation notes
 The package has been tested on Python 3.10.12.
