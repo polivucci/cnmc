@@ -9,4 +9,6 @@ Lorenz data for use in `experiments/lorenz63` can be downloaded from https://doi
 
 #### Installation notes
 The package has been tested on Python 3.10.12.
-The required dependencies can be installed via `pip install -r requirements.txt`.
+The required dependencies can be installed via 
+
+`pip install -r requirements.txt`.
