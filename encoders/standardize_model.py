@@ -1,16 +1,16 @@
 import torch as pt
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
-from .procrustes import ProcrustesEncoder
+from .standardize import MaxStdEncoder
 from copy import deepcopy
 
-class procrustes_model(object):
-     '''Supervised model for the parametric Procrustes transformation.
+class standardize_model(object):
+     '''Supervised model for the parametric standardization transformation.
      '''
      def __init__(self, base_model=LinearRegression()):
         self.base_model = base_model
       #   self.base_model_options = base_model_options
-        self.models = {'mean': [], 'scale': [], 'rotation': []}
+        self.models = {'mean': [], 'scale': []}
      
      def train(self, encoders, ocs):
         nocs = pt.atleast_2d(pt.Tensor(ocs))
@@ -21,12 +21,10 @@ class procrustes_model(object):
 
         means_train = [encoder.mean_ for encoder in encoders.values()]
         stds_train = [encoder.scale_ for encoder in encoders.values()]
-        rotations_train = [encoder.rotation_.flatten() for encoder in encoders.values()]
         
         means_trains = pt.concat(means_train, dim=-1).T.unsqueeze(0)
         stds_trains = pt.Tensor(stds_train).unsqueeze(0).unsqueeze(-1)
-        rotations_trains = pt.stack(rotations_train).unsqueeze(0)
-        Ys = {'mean': means_trains, 'scale': stds_trains, 'rotation': rotations_trains}
+        Ys = {'mean': means_trains, 'scale': stds_trains}
 
         for param in self.models.keys():
             ys = Ys[param]
@@ -45,13 +43,11 @@ class procrustes_model(object):
         
         mean_cnmc  = params_cnmc['mean']
         std_cnmc  = params_cnmc['scale']
-        rotation_cnmc = params_cnmc['rotation']
-        cnmc_encoder = ProcrustesEncoder()
+        cnmc_encoder = MaxStdEncoder()
         sdim = mean_cnmc.shape[0]
         cnmc_encoder._state_size = mean_cnmc.shape[0]
         cnmc_encoder.mean_ = mean_cnmc
         cnmc_encoder.scale_ = std_cnmc
-        cnmc_encoder.rotation_ = rotation_cnmc.reshape((sdim, sdim))
         cnmc_encoder.trained = True 
 
         return cnmc_encoder

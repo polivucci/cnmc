@@ -1,5 +1,6 @@
 import torch as pt
 from flowtorch.rom.base import Encoder
+from .procrustes import centre_and_standardize
 
 class MaxStdEncoder(Encoder):
 
@@ -14,12 +15,18 @@ class MaxStdEncoder(Encoder):
         self.mean_ = None
         self.scale_ = None
 
-    def train(self, data: pt.Tensor) -> dict:
-        self._state_size = data.shape[0]
-        self.mean_ = data.mean(dim=-1, keepdims=True)
-        self.scale_ = data.std(dim=-1).max().item()
+    def train(self, state: pt.Tensor) -> dict:
+        self._state_size = state.shape[0]
+
+        # self.mean_ = data.mean(dim=-1, keepdims=True)
+        # self.scale_ = data.std(dim=-1).max().item()
+
+        # learn empirical frame of target state (centre -> scale -> principal components)
+        state = state.detach()
+        _, self.mean_, self.scale_ = centre_and_standardize(state)
+
         self.trained = True
-        return dict()
+        return self
 
     def encode(self, full_state: pt.Tensor) -> pt.Tensor:
         """Scale with standard deviation.
